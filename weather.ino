@@ -1,11 +1,13 @@
-#include "Wireh.h" //I2C needed for sensors
-#include "MPL3115A2.h" //Pressure sensor
-#include "HTU21D.h" //Humidity sensor
+// This #include statement was automatically added by the Spark IDE.
+#include "Adafruit_MPL3115A2/Adafruit_MPL3115A2.h"
+#include "HTU21D/HTU21D.h"
 
-MPL3115A2 myPressure; //Create an instance of the pressure sensor
+Adafruit_MPL3115A2 myPressure = Adafruit_MPL3115A2(); //Create an instance of the pressure sensor
 HTU21D myHumidity; //Create an instance of the humidity sensor
+
 TCPClient client;
 String writeAPIKey = "";
+
 //Hardware pin definitions
 //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 // digital I/O pins
@@ -15,7 +17,6 @@ const byte RAIN = 2;
 // analog I/O pins
 const byte REFERENCE_3V3 = A3;
 const byte LIGHT = A1;
-const byte BATT = A2;
 const byte WDIR = A5;
 //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
@@ -24,6 +25,7 @@ const byte WDIR = A5;
 long lastSecond; //The millis counter to see when a second rolls by
 long lastThingSpeakUpdate;
 int thingSpeakUpdateInterval = 60000;
+int coreSleepDuration = 0;
 byte seconds; //When it hits 60, increase the current minute
 byte seconds_2m; //Keeps track of the "wind speed/dir avg" over last 2 minutes array of data
 byte minutes; //Keeps track of where we are in various arrays of data
@@ -33,38 +35,20 @@ long lastWindCheck = 0;
 volatile long lastWindIRQ = 0;
 volatile byte windClicks = 0;
 
-//We need to keep track of the following variables:
-//Wind speed/dir each update (no storage)
-//Wind gust/dir over the day (no storage)
-//Wind speed/dir, avg over 2 minutes (store 1 per second)
-//Wind gust/dir over last 10 minutes (store 1 per minute)
-//Rain over the past hour (store 1 per minute)
-//Total rain over date (store one per day)
-
+// All the weather variables that we're going to track
 float windspdavg[120]; //120 bytes to keep track of 2 minute average
 int winddiravg[120]; //120 ints to keep track of 2 minute average
-// float windgust_10m[10]; //10 floats to keep track of 10 minute max
-// int windgustdirection_10m[10]; //10 ints to keep track of 10 minute max
 volatile float rainHour[60]; //60 floating numbers to keep track of 60 minutes of rain
-
-//These are all the weather values that wunderground expects:
 int winddir = 0; // [0-360 instantaneous wind direction]
 float windspeedmph = 0; // [mph instantaneous wind speed]
-// float windgustmph = 0; // [mph current wind gust, using software specific time period]
-// int windgustdir = 0; // [0-360 using software specific time period]
 float windspdmph_avg2m = 0; // [mph 2 minute average wind speed mph]
 int winddir_avg2m = 0; // [0-360 2 minute average wind direction]
-// float windgustmph_10m = 0; // [mph past 10 minutes wind gust mph ]
-// int windgustdir_10m = 0; // [0-360 past 10 minutes wind gust direction]
 float humidity = 0; // [%]
 float tempf = 0; // [temperature F]
 float rainin = 0; // [rain inches over the past hour)] -- the accumulated rainfall in the past 60 min
 volatile float dailyrainin = 0; // [rain inches so far today in local time]
-//float baromin = 30.03;// [barom in] - It's hard to calculate baromin locally, do this in the agent
 float pressure = 0;
-//float dewptf; // [dewpoint F] - It's hard to calculate dewpoint locally, do this in the agent
 
-float batt_lvl = 11.8; //[analog value from 0 to 1023]
 float light_lvl = 455; //[analog value from 0 to 1023]
 
 // volatiles are subject to modification by IRQs
@@ -104,11 +88,7 @@ void wspeedIRQ()
 void setup()
 {
   Serial.begin(9600);
-  Serial.println("Weather Shield Example");
 
-//   pinMode(STAT1, OUTPUT); //Status LED Blue
-//   pinMode(STAT2, OUTPUT); //Status LED Green
-  
   pinMode(WSPEED, INPUT_PULLUP); // input from wind meters windspeed sensor
   pinMode(RAIN, INPUT_PULLUP); // input from wind meters rain gauge sensor
   pinMode(WDIR, INPUT);
@@ -118,10 +98,6 @@ void setup()
 
   //Configure the pressure sensor
   myPressure.begin(); // Get sensor online
-  myPressure.setModeBarometer(); // Measure pressure in Pascals from 20 to 110 kPa
-  myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
-  myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
-
   //Configure the humidity sensor
   myHumidity.begin();
 
@@ -129,13 +105,13 @@ void setup()
   lastSecond = millis();
 
   // attach external interrupt pins to IRQ functions
-//   attachInterrupt(RAIN, rainIRQ, FALLING);
+  attachInterrupt(RAIN, rainIRQ, FALLING);
   attachInterrupt(WSPEED, wspeedIRQ, FALLING);
 
   // turn on interrupts
   interrupts();
 
-  Serial.println("Weather Shield online!");
+  Serial.println("Weather Station online!");
 
 }
 
@@ -180,7 +156,7 @@ void loop()
       updateData();
       lastThingSpeakUpdate = millis();
       
-    //   Spark.sleep(40);
+      if (coreSleepDuration > 0) Spark.sleep(coreSleepDuration);
   }
 }
 
@@ -206,14 +182,9 @@ void calcWeather()
 
   //Calc humidity
   humidity = myHumidity.readHumidity();
-  //float temp_h = myHumidity.readTemperature();
-  //Serial.print(" TempH:");
-  //Serial.print(temp_h, 2);
 
   //Calc tempf from pressure sensor
-  tempf = myPressure.readTempF();
-  //Serial.print(" TempP:");
-  //Serial.print(tempf, 2);
+  tempf = ((myPressure.getTemperature() * 9.0)/ 5.0 + 32.0);
 
   //Total rainfall for the day is calculated within the interrupt
   //Calculate amount of rainfall for the last 60 minutes
@@ -222,15 +193,10 @@ void calcWeather()
     rainin += rainHour[i];
 
   //Calc pressure
-  pressure = myPressure.readPressure();
-
-  //Calc dewptf
-
+  pressure = myPressure.getPressure();
+  
   //Calc light level
   light_lvl = get_light_level();
-
-  //Calc battery level
-  batt_lvl = get_battery_level();
 }
 
 //Returns the voltage of the light sensor based on the 3.3V rail
@@ -246,25 +212,6 @@ float get_light_level()
   lightSensor = operatingVoltage * lightSensor;
   
   return(lightSensor);
-}
-
-//Returns the voltage of the raw pin based on the 3.3V rail
-//This allows us to ignore what VCC might be (an Arduino plugged into USB has VCC of 4.5 to 5.2V)
-//Battery level is connected to the RAW pin on Arduino and is fed through two 5% resistors:
-//3.9K on the high side (R1), and 1K on the low side (R2)
-float get_battery_level()
-{
-  float operatingVoltage = analogRead(REFERENCE_3V3);
-
-  float rawVoltage = analogRead(BATT);
-  
-  operatingVoltage = 3.30 / operatingVoltage; //The reference voltage is 3.3V
-  
-  rawVoltage = operatingVoltage * rawVoltage; //Convert the 0 to 1023 int to actual voltage on BATT pin
-  
-  rawVoltage *= 4.90; //(3.9k+1k)/1k - multiple BATT voltage by the voltage divider to get actual system voltage
-  
-  return(rawVoltage);
 }
 
 //Returns the instataneous wind speed
@@ -290,66 +237,16 @@ int get_wind_direction()
   unsigned int adc;
 
   adc = analogRead(WDIR) >> 2;// get the current reading from the sensor
-//   pinMode(WDIR, INPUT_PULLUP);
-    // Serial.println(adc);
-
-  // The following table is ADC readings for the wind direction sensor output, sorted from low to high.
-  // Each threshold is the midpoint between adjacent headings. The output is degrees for that ADC reading.
-  // Note that these are not in compass degree order! See Weather Meters datasheet for more information.
-
-//   if (adc < 380) return (113);
-//   if (adc < 393) return (68);
-//   if (adc < 414) return (90);
-//   if (adc < 456) return (158);
-//   if (adc < 508) return (135);
-//   if (adc < 551) return (203);
-//   if (adc < 615) return (180);
-//   if (adc < 680) return (23);
-//   if (adc < 746) return (45);
-//   if (adc < 801) return (248);
-//   if (adc < 833) return (225);
-//   if (adc < 878) return (338);
-//   if (adc < 913) return (0);
-//   if (adc < 940) return (293);
-//   if (adc < 967) return (315);
-//   if (adc < 990) return (270);
-
-    if (adc < 440) return (0);
-    if (adc < 525) return (45);
-    if (adc < 633) return (90);
-    if (adc < 752) return (315);
-    if (adc < 850) return (135);
-    if (adc < 921) return (270);
-    if (adc < 961) return (225);
-    if (adc < 1000) return (180);
   
-  
-//   398   N
-//   482   NE
-//   568   E
-//   698   NW
-//   806   SE
-//   895   W
-//   947   SW
-//   976   S
-  
-//   440   N
-//   525   NE
-// //   633   E
-//   752   NW
-//   850   SE
-// //   921   W
-//   961   SW
-//   1000  S
-  
-  
-  
-  
-  
-  
-  
-  
-  
+  if (adc < 440) return (45);
+  if (adc < 525) return (90);
+  if (adc < 633) return (135);
+  if (adc < 752) return (0);
+  if (adc < 850) return (180);
+  if (adc < 921) return (315);
+  if (adc < 961) return (270);
+  if (adc < 1000) return (225);
+ 
   return (-1); // error, disconnected?
 }
 
@@ -364,18 +261,10 @@ void printWeather()
   Serial.print(winddir);
   Serial.print(",windspeedmph=");
   Serial.print(windspeedmph, 1);
-//   Serial.print(",windgustmph=");
-//   Serial.print(windgustmph, 1);
-//   Serial.print(",windgustdir=");
-//   Serial.print(windgustdir);
   Serial.print(",windspdmph_avg2m=");
   Serial.print(windspdmph_avg2m, 1);
   Serial.print(",winddir_avg2m=");
   Serial.print(winddir_avg2m);
-//   Serial.print(",windgustmph_10m=");
-//   Serial.print(windgustmph_10m, 1);
-//   Serial.print(",windgustdir_10m=");
-//   Serial.print(windgustdir_10m);
   Serial.print(",humidity=");
   Serial.print(humidity, 1);
   Serial.print(",tempf=");
@@ -386,8 +275,6 @@ void printWeather()
   Serial.print(dailyrainin, 2);
   Serial.print(",pressure=");
   Serial.print(pressure, 2);
-  Serial.print(",batt_lvl=");
-  Serial.print(batt_lvl, 2);
   Serial.print(",light_lvl=");
   Serial.print(light_lvl, 2);
   Serial.print(",");
@@ -397,7 +284,7 @@ void printWeather()
 
 void updateData()
 {
-    ThingSpeakUpdate("field1=" + String(tempf) + "&field2=" + String(humidity) + "&field3=" + String(pressure) + "&field4=" + String(light_lvl) + "&field5=" + String(winddir_avg2m) + "&field6=" + String(windspdmph_avg2m) + "&field7=" + String(dailyrainin) + "&field8=" + String(batt_lvl));
+    ThingSpeakUpdate("field1=" + String(tempf) + "&field2=" + String(humidity) + "&field3=" + String(pressure) + "&field4=" + String(light_lvl) + "&field5=" + String(winddir_avg2m) + "&field6=" + String(windspdmph_avg2m) + "&field7=" + String(dailyrainin));
 }
 
 void ThingSpeakUpdate(String tsData)
